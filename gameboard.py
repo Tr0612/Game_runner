@@ -3,13 +3,30 @@ from PyQt5.QtWidgets import QApplication, QWidget, QPushButton, QGridLayout, QMe
 from PyQt5.QtCore import Qt,QTimer
 from board_visualizer import BoardDetector
 import random
+from Arduino_Files.IK import IkSolver
+from Arduino_Files.communicator import SerialDevice
 
 
-ROWS, COLS = 3, 4  # 3x4 board
+ROWS, COLS = 3, 3  # 3x4 board
 
 class TicTacToeGame(QWidget):
     def __init__(self):
         super().__init__()
+        self.cell_xyz = {
+    "A1": (0.46, -0.36, 0.65),
+    "B1": (0.52, -0.45, 1.15),
+    "C1": (0.55,  0.39, 1.75),
+    "D1": (0.79,  0.86, 1.94),
+    "A2": (-0.43, 0.73, 1.93),
+    "B2": (-0.05, 0.16, 1.37),
+    "C2": (0.86,  0.06, 1.72),
+    "D2": (0.62, -0.98, 0.42),
+    "A3": (-0.28, -0.06, 1.91),
+    "B3": (0.57,  0.00, 1.30),
+    "C3": (0.64,  0.32, 0.50),
+    "D3": (-0.04, -0.88, 0.21)
+}
+        
         self.detector = BoardDetector()
         self.current_player = 'X'  # X starts the game
         self.board = [['' for _ in range(COLS)] for _ in range(ROWS)]
@@ -139,6 +156,12 @@ class TicTacToeGame(QWidget):
         row,col = random.choice(empty_cells)
         
         cell_label = chr(ord('A') + col) + str(row+1)
+        
+        x,y,z = self.cell_xyz[cell_label]
+        angle = IkSolver.ik_function(x,y,z)
+        
+        robot_status = SerialDevice.send_data_f(angle)
+            
         print(f"Robot Played {cell_label}")
         self.make_move(row,col)
         
