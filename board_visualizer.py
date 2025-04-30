@@ -1,21 +1,21 @@
+import time
+import csv
+import math
+
+import cv2
 import numpy as np
 import pyrealsense2 as rs
-import cv2
-import csv
 from ultralytics import YOLO
-import time
 
 # ==== CONFIG ====
-ROWS, COLS = 3, 4
-MODEL_PATH = "D:/University/OneDrive - UCB-O365/Mech2/Final_Project/runs/detect/train5/weights/best.pt"
-# MODEL_PATH = "/media/thanush/Elements/University/OneDrive - UCB-O365/Mech2/Final_Project/runs/detect/train5/weights/best.pt"
+ROWS, COLS = 3, 3
+MODEL_PATH = "D:/University/OneDrive - UCB-O365/Mech2/Final_Project/runs/detect/train15/weights/best.pt"
 OUTPUT_FILE = "detected_coordinates.csv"
-CONFIDENCE_THRESHOLD = 0.8
-
+CONFIDENCE_THRESHOLD = 0.5
 
 class BoardDetector:
     def __init__(self):
-        # Initialize RealSense pipeline
+        # — RealSense setup —
         self.pipeline = rs.pipeline()
         config = rs.config()
         config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
@@ -24,175 +24,204 @@ class BoardDetector:
         self.detection_interval =15
         self.last_detection_time = 0
         profile = self.pipeline.get_active_profile()
-        self.color_intrinsics = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
+        self.color_intrinsics = (
+            profile.get_stream(rs.stream.color)
+                   .as_video_stream_profile()
+                   .get_intrinsics()
+        )
 
         self.ready = True
-        
-        # Load YOLOv8 model
-        self.model = YOLO(MODEL_PATH)
-        self.cell_width = 640 // COLS
-        self.cell_height = 480 // ROWS
 
-        # CSV header setup
-        with open(OUTPUT_FILE, mode='w', newline='') as file:
-            writer = csv.writer(file)
-            writer.writerow(["Label", "Row", "Col", "X", "Y", "Z"])
+        # — YOLOv8 model load —
+        self.model = YOLO(MODEL_PATH)
+
+        # — Grid parameters (tweak these to match your taped grid) —
+        self.grid_top_left     = (134, 100)   # (x, y)
+        self.grid_bottom_right = (420, 350)   # (x, y)
+        self.rotation_angle    = 0            # set to nonzero if your board is tilted
+        self._compute_grid_metrics()
+
+        # — CSV header —
+        with open(OUTPUT_FILE, "w", newline="") as f:
+            csv.writer(f).writerow(["Label","Row","Col","X","Y","Z"])
+
+    def _compute_grid_metrics(self):
+        # called any time you change grid_top_left / bottom_right / rotation_angle
+        tl, br = self.grid_top_left, self.grid_bottom_right
+        self.center_x = (tl[0] + br[0]) // 2
+        self.center_y = (tl[1] + br[1]) // 2
+        self.grid_w = br[0] - tl[0]
+        self.grid_h = br[1] - tl[1]
+        self.cell_w = self.grid_w // COLS
+        self.cell_h = self.grid_h // ROWS
+
+    def rotate_point(self, x, y, angle):
+        """Rotate (x,y) about the grid center by angle degrees."""
+        cx, cy = self.center_x, self.center_y
+        a = math.radians(angle)
+        dx, dy = x - cx, y - cy
+        xr = dx * math.cos(a) - dy * math.sin(a) + cx
+        yr = dx * math.sin(a) + dy * math.cos(a) + cy
+        return int(xr), int(yr)
 
     def depth_to_world(self, x, y, depth):
         fx, fy = self.color_intrinsics.fx, self.color_intrinsics.fy
         cx, cy = self.color_intrinsics.ppx, self.color_intrinsics.ppy
         X = (x - cx) * depth / fx
         Y = (y - cy) * depth / fy
-        Z = depth
-        return X, Y, Z
-
+        return X, Y, depth
+    
     def get_current_board_state(self):
-        """Get the current board state as a 2D array of detected symbols."""
-        
-        current_time = time.time()
-        
-        if (current_time - self.last_detection_time) < self.detection_interval:
-            return None
-        
-        
+        """
+        Poll the camera, run one YOLO inference, and return
+        a 3×3 list-of-lists with ''/’X’/’O’ for each cell.
+        """
+        # grab a fresh frame
         frames = self.pipeline.wait_for_frames()
-        color_frame = frames.get_color_frame()
-        depth_frame = frames.get_depth_frame()
-        if not color_frame or not depth_frame:
+        cf = frames.get_color_frame()
+        df = frames.get_depth_frame()
+        if not cf or not df:
             return None
 
-        color_image = np.asanyarray(color_frame.get_data())
-        rgb_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
-        results = self.model(rgb_image, conf=CONFIDENCE_THRESHOLD)
+        img = np.asanyarray(cf.get_data())
+        # run detection
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        results = self.model(rgb, conf=CONFIDENCE_THRESHOLD,verbose=False)
 
-        board_state = [['' for _ in range(COLS)] for _ in range(ROWS)]
-        for r in results:
-            for box in r.boxes:
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
+        # clear board
+        board = [['' for _ in range(COLS)] for _ in range(ROWS)]
+
+        # same cell-mapping logic as in show_detection_window
+        for det in results:
+            for box in det.boxes:
+                x1,y1,x2,y2 = map(int, box.xyxy[0])
                 label = self.model.names[int(box.cls[0])]
-                center_x = (x1 + x2) // 2
-                center_y = (y1 + y2) // 2
-                col = min(center_x // self.cell_width, COLS - 1)
-                row = min(center_y // self.cell_height, ROWS - 1)
-                board_state[row][col] = label
-                
-        self.last_detection_time = current_time
-        
-        return board_state
+
+                # skip entirely outside grid
+                tlx,tly = self.grid_top_left
+                brx,bry = self.grid_bottom_right
+                if x2<tlx or x1>brx or y2<tly or y1>bry:
+                    continue
+
+                # center & inverse rotate
+                cx, cy = (x1+x2)//2, (y1+y2)//2
+                unx,uny = self.rotate_point(cx, cy, -self.rotation_angle)
+
+                # map into cell
+                relx, rely = unx - tlx, uny - tly
+                if not (0<=relx<self.grid_w and 0<=rely<self.grid_h):
+                    continue
+
+                c = min(relx//self.cell_w, COLS-1)
+                r = min(rely//self.cell_h, ROWS-1)
+                board[r][c] = label
+
+        return board
+
 
     def stop(self):
         self.pipeline.stop()
         cv2.destroyAllWindows()
-    
-    def reset(self):
-        print("Camera Reset")
-        self.ready = False
-        self.pipeline.stop()
-        time.sleep(0.5)
-        config = rs.config()
-        config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-        config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-        self.pipeline.start(config)
-        
-        for _ in range(5):
-            try:
-                self.pipeline.wait_for_frames()
-            except Exception as e:
-                print("[Detector] Frame wait failed (warming up):", e)
-            time.sleep(0.1)
-        
-        self.ready = True
-        print("Camera Ready")
 
     def show_detection_window(self):
-        """Optional: run manual OpenCV loop where pressing 'd' triggers detection display."""
-        
-        if not self.ready:
-            print("Detector not ready")
-            return
-        
-        for attempt in range(10):
-            try:
-                frames = self.pipeline.wait_for_frames()
-                break  # ✅ success
-            except RuntimeError:
-                print(f"[Detector] Frame wait failed, retry {attempt + 1}/5")
-                time.sleep(0.2)
-        
-        try:
-            while True:
-                frames = self.pipeline.wait_for_frames()
-                color_frame = frames.get_color_frame()
-                depth_frame = frames.get_depth_frame()
+        """Live stream + manual ‘d’ key to detect"""
+        self._compute_grid_metrics()
 
-                if not color_frame or not depth_frame:
-                    continue
+        while True:
+            # grab frames
+            frames = self.pipeline.wait_for_frames()
+            cf = frames.get_color_frame()
+            df = frames.get_depth_frame()
+            if not cf or not df:
+                continue
 
-                color_image = np.asanyarray(color_frame.get_data())
-                depth_image = np.asanyarray(depth_frame.get_data())
-                display_image = color_image.copy()
+            color = np.asanyarray(cf.get_data())
+            depth = np.asanyarray(df.get_data())
 
-                # Draw grid overlay
-                for i in range(1, COLS):
-                    cv2.line(display_image, (i * self.cell_width, 0),
-                             (i * self.cell_width, display_image.shape[0]), (255, 0, 0), 2)
-                for j in range(1, ROWS):
-                    cv2.line(display_image, (0, j * self.cell_height),
-                             (display_image.shape[1], j * self.cell_height), (255, 0, 0), 2)
+            # draw grid (unrotated here; if you use rotation, rotate each line endpoint)
+            tlx,tly = self.grid_top_left
+            brx,bry = self.grid_bottom_right
+            # verticals
+            for i in range(1, COLS):
+                x = tlx + i*self.cell_w
+                p1 = self.rotate_point(x, tly, self.rotation_angle)
+                p2 = self.rotate_point(x, bry, self.rotation_angle)
+                cv2.line(color, p1, p2, (0,255,0), 3)
+            # horizontals
+            for j in range(1, ROWS):
+                y = tly + j*self.cell_h
+                p1 = self.rotate_point(tlx, y, self.rotation_angle)
+                p2 = self.rotate_point(brx, y, self.rotation_angle)
+                cv2.line(color, p1, p2, (0,255,0), 3)
+            # outer box
+            corners = [
+                self.rotate_point(tlx, tly, self.rotation_angle),
+                self.rotate_point(brx, tly, self.rotation_angle),
+                self.rotate_point(brx, bry, self.rotation_angle),
+                self.rotate_point(tlx, bry, self.rotation_angle),
+            ]
+            for k in range(4):
+                cv2.line(color, corners[k], corners[(k+1)%4], (0,255,0), 4)
 
-                cv2.putText(display_image, "Press 'd' to detect | Press 'q' to quit",
-                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            cv2.putText(color, "Press 'd' to detect | 'q' to quit",
+                        (10,30), cv2.FONT_HERSHEY_SIMPLEX, .7, (255,255,0),2)
+            cv2.imshow("Tic Tac Toe Detection", color)
+            key = cv2.waitKey(1) & 0xFF
+            if key==ord('q'):
+                break
 
-                cv2.imshow('Tic Tac Toe Detection', display_image)
-                key = cv2.waitKey(1) & 0xFF
+            if key==ord('d'):
+                # ==== RUN DETECTION ====
+                rgb = cv2.cvtColor(color, cv2.COLOR_BGR2RGB)
+                results = self.model(rgb, conf=CONFIDENCE_THRESHOLD)
 
-                if key == ord('q'):
-                    break
+                # clear board
+                board = [['' for _ in range(COLS)] for _ in range(ROWS)]
 
-                elif key == ord('d'):
-                    # Detection mode
-                    board_state = [['' for _ in range(COLS)] for _ in range(ROWS)]
-                    color_image_rgb = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
-                    results = self.model(color_image_rgb, conf=CONFIDENCE_THRESHOLD)
+                # process each detection
+                for det in results:
+                    for box in det.boxes:
+                        x1,y1,x2,y2 = map(int,box.xyxy[0])
+                        label = self.model.names[int(box.cls[0])]
+                        # ignore entirely outside grid
+                        if x2<tlx or x1>brx or y2<tly or y1>bry:
+                            continue
 
-                    for r in results:
-                        for box in r.boxes:
-                            x1, y1, x2, y2 = map(int, box.xyxy[0])
-                            conf = box.conf[0].item()
-                            label = self.model.names[int(box.cls[0])]
-                            center_x = (x1 + x2) // 2
-                            center_y = (y1 + y2) // 2
+                        # center point
+                        cx, cy = (x1+x2)//2, (y1+y2)//2
+                        # inverse rotate center to align with unrotated grid
+                        unx,uny = self.rotate_point(cx, cy, -self.rotation_angle)
 
-                            col = min(center_x // self.cell_width, COLS - 1)
-                            row = min(center_y // self.cell_height, ROWS - 1)
-                            board_state[row][col] = label
+                        # local coords
+                        lx, ly = unx - tlx, uny - tly
+                        if not (0<=lx<self.grid_w and 0<=ly<self.grid_h):
+                            continue
 
-                            depth = depth_image[center_y, center_x]
-                            X, Y, Z = self.depth_to_world(center_x, center_y, depth)
+                        col = min(lx//self.cell_w, COLS-1)
+                        row = min(ly//self.cell_h, ROWS-1)
+                        board[row][col] = label
 
-                            with open(OUTPUT_FILE, mode='a', newline='') as file:
-                                writer = csv.writer(file)
-                                writer.writerow([label, row, col, X, Y, Z])
+                        # draw box & center
+                        cv2.rectangle(color,(x1,y1),(x2,y2),(255,0,0),2)
+                        cv2.circle(color,(cx,cy),4,(0,0,255),-1)
+                        # optional: depth→world
+                        Z = int(depth[cy, cx])
+                        X,Y,Z = self.depth_to_world(cx, cy, Z)
+                        # log to CSV
+                        with open(OUTPUT_FILE,"a",newline="") as f:
+                            csv.writer(f).writerow([label,row,col,f"{X:.3f}",f"{Y:.3f}",Z])
 
-                            cv2.rectangle(color_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                            cv2.putText(color_image, f"{label} {conf:.2f}", (x1, y1 - 10),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                # print board state
+                print("\nBoard State:")
+                for r in board:
+                    print(r)
 
-                    # Show detected board
-                    for r in range(ROWS):
-                        for c in range(COLS):
-                            if board_state[r][c] != '':
-                                cx = c * self.cell_width + 10
-                                cy = r * self.cell_height + 30
-                                cv2.putText(color_image, board_state[r][c], (cx, cy),
-                                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                cv2.imshow("Tic Tac Toe Detection", color)
+                cv2.waitKey(0)
 
-                    print("\nBoard State:")
-                    for row in board_state:
-                        print(row)
+        self.stop()
 
-                    cv2.imshow('Tic Tac Toe Detection', color_image)
-                    cv2.waitKey(0)
 
-        finally:
-            self.stop()
+if __name__ == "__main__":
+    bd = BoardDetector()
+    bd.show_detection_window()

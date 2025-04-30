@@ -5,9 +5,10 @@ from PyQt5.QtCore import QTimer
 from gameboard import TicTacToeGame
 from board_visualizer import BoardDetector
 
-ROWS, COLS = 3, 4
+ROWS, COLS = 3, 3
 
-
+bd = BoardDetector()
+# bd.reset
 last_detection_time = 0
 DETECTION_INTERVAL = 15
 
@@ -34,8 +35,12 @@ def poll_camera_and_update():
         
         if current_time - last_detection_time < DETECTION_INTERVAL:
             return
-        
-        new_board = detector.get_current_board_state()
+        if game.reset_pass() == 0:
+            new_board = detector.get_current_board_state()
+        if game.reset_pass() == 1:
+            prev_board = [['' for _ in range(COLS)] for _ in range(ROWS)]
+            new_board = [['' for _ in range(COLS)] for _ in range(ROWS)]
+            game.reset=0
         if new_board:
             # Merge new detections into existing board
             updated = False
@@ -71,7 +76,7 @@ if __name__ == "__main__":
         timer = QTimer()
         timer.timeout.connect(poll_camera_and_update)
         timer.start(1000)  # ms
-        detector.show_detection_window()
+        # detector.show_detection_window()
     else:
         print("Skipping camera polling...")
 

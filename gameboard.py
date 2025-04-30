@@ -1,10 +1,13 @@
 import sys
 from PyQt5.QtWidgets import QApplication, QWidget, QPushButton, QGridLayout, QMessageBox,QLabel,QVBoxLayout
 from PyQt5.QtCore import Qt,QTimer
+import time
 from board_visualizer import BoardDetector
 import random
-from Arduino_Files.IK import IkSolver
-from Arduino_Files.communicator import SerialDevice
+# from Arduino_Files.IK import IkSolver
+# from Arduino_Files.communicator import SerialDevice
+from Arduino_Files.RFBot import RFBot
+# from runner import prev_board
 
 
 ROWS, COLS = 3, 3  # 3x4 board
@@ -13,30 +16,37 @@ class TicTacToeGame(QWidget):
     def __init__(self):
         super().__init__()
         self.cell_xyz = {
-    "A1": (0.46, -0.36, 0.65),
-    "B1": (0.52, -0.45, 1.15),
-    "C1": (0.55,  0.39, 1.75),
-    "D1": (0.79,  0.86, 1.94),
-    "A2": (-0.43, 0.73, 1.93),
-    "B2": (-0.05, 0.16, 1.37),
-    "C2": (0.86,  0.06, 1.72),
-    "D2": (0.62, -0.98, 0.42),
-    "A3": (-0.28, -0.06, 1.91),
-    "B3": (0.57,  0.00, 1.30),
-    "C3": (0.64,  0.32, 0.50),
-    "D3": (-0.04, -0.88, 0.21)
+    "C1": (230,85,90),
+    "C2": (230,-10,90),
+    "C3": (230,-110,90),
+    "X" : (230,-210,75),
+    # "D1": (0.79,  0.86, 1.94),
+    "B1": (330,75,95),
+    "B2": (325,-15,95),
+    "B3": (320,-110,95),
+    # "D2": (0.62, -0.98, 0.42),
+    "A1": (415,70,105),
+    "A2": (405,-20,105),
+    "A3": (405,-115,105),
+    # "D3": (-0.04, -0.88, 0.21)
 }
         
+        # self.robot = RFBot(port='COM3', baud='9600')
+        self.robot = RFBot(port="COM5")
         self.detector = BoardDetector()
+        self.reset = 0
+        self.X_count = 0
         self.current_player = 'X'  # X starts the game
+        self.prev_board = [['' for _ in range(COLS)] for _ in range(ROWS)] 
         self.board = [['' for _ in range(COLS)] for _ in range(ROWS)]
-        self.time_seconds = 15
+        self.time_seconds = 5
         self.initUI()
         
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_timer)
         self.timer.start(1000)
         self.start_turn('X')
+        
 
     def update_board_state(self, new_board):
         print("Received new board state")
@@ -144,10 +154,20 @@ class TicTacToeGame(QWidget):
         self.update_empty_cell_count()
 
         if player == 'X':
-            print("[Game] Robot's turn...")
-            self.make_robot_move()
+            var = self.check_winner()
+            if self.check_winner() == None:
+                print("[Game] Robot's turn...")
+                self.X_count += 1
+                self.make_robot_move()
+            else:
+                self.timer.stop()
+                self.show_message(f"Player {var} wins")
+                self.reset_game()
+                return
+                
     
     def make_robot_move(self):
+        i = 0
         empty_cells = [(r,c) for r in range(ROWS) for c in range(COLS) if self.board[r][c] == '']
         
         if not empty_cells:
@@ -156,11 +176,98 @@ class TicTacToeGame(QWidget):
         row,col = random.choice(empty_cells)
         
         cell_label = chr(ord('A') + col) + str(row+1)
+        pos = self.cell_xyz[cell_label]
+        px,py,pz = pos
+        xx,xy,xz = self.cell_xyz['X']
+        # bx,by,bz = pos
+        lift_amount = self.X_count*40
+        place_amount = self.X_count*20
+        x_pos = (xx,xy,xz+place_amount)
+        x_pos_up = (xx,xy,xz+lift_amount)
+        # x_pos[2] += self.X_count*20
+        # x_pos_up[2] += self.X_count*40
+        print(x_pos_up)
+        print(x_pos)
+        print(pos)
+        # self.robot.release()
+        self.robot.move(x_pos_up)
+        while i ==0:
+            data = self.robot.get_state()
+            if data != None:
+                break
+        # time.sleep(100)
+        self.robot.move(x_pos)
+        while i ==0:
+            data = self.robot.get_state()
+            if data != None:
+                break
         
-        x,y,z = self.cell_xyz[cell_label]
-        angle = IkSolver.ik_function(x,y,z)
         
-        robot_status = SerialDevice.send_data_f(angle)
+        # # self.robot.grip()
+        # self.robot.move(x_pos_up)
+        # while i == 0:
+        #     data = self.robot.get_state()
+        #     print(type(data))
+        #     if len(data) != 0:
+        #         data = None
+        #         self.robot.move(x_pos)
+        #         time.sleep(100)
+        #         self.robot.grip()
+        #         data = self.robot.get_state()
+        #         if len(data) != 0:
+        #             i = 1
+        #             data = None
+        #             self.robot.move(x_pos_up)
+                    
+        self.robot.move(pos)
+        while i ==0:
+            data = self.robot.get_state()
+            if data != None:
+                break
+        self.robot.zero()
+        while i ==0:
+            data = self.robot.get_state()
+            if data != None:
+                break
+        
+        # # self.robot.release()
+        # pos_up = (px,py,pz+40)
+        # self.robot.move(pos_up)
+        # self.robot.zero()
+        # self.robot.grip()
+        # i = 0 
+        # while i == 0:
+        #     data = self.robot.get_state()
+        #     if len(data) != 0:
+        #         data = None
+        #         pos_up = pos
+        #         pos_up[2] += 40
+        #         time.sleep(100)
+        #         self.robot.release()
+        #         time.sleep(100)
+        #         self.robot.move(pos_up)
+        #         data = self.robot.get_state()
+        #         if len(data) != 0:
+        #             data = None
+        #             self.robot.move(zero)
+        #             self.robot.grip()
+        #             data = self.robot.get_state()
+        #             if len(data) != 0:
+        #                 i = 1
+        #                 data = None
+        # time.sleep(100) 
+        # self.robot.move(zero)
+        # data = self.robot.get_state()
+        # if len(data) != 0:
+        #     print("Robot Movement Done")
+        #     data = None
+        #     i = 0
+        # RFBot.move(pos=pos)
+        
+        # x,y,z = self.cell_xyz[cell_label]
+        # angle = IkSolver.ik_function(x,y,z)
+        
+        # robot_status = SerialDevice.send_data_f(angle)
             
         print(f"Robot Played {cell_label}")
         self.make_move(row,col)
@@ -210,14 +317,36 @@ class TicTacToeGame(QWidget):
                 c = self.board[row+2][col]
                 if a and a == b == c:
                     return a
+        
+        for row in range(ROWS - 2):
+            for col in range(COLS - 2):
+                a = self.board[row][col]
+                b = self.board[row+1][col+1]
+                c = self.board[row+2][col+2]
+                if a and a == b == c:
+                    return a
 
+    # Check “/” diagonals (top-right → bottom-left)
+        for row in range(ROWS - 2):
+            for col in range(2, COLS):
+                a = self.board[row][col]
+                b = self.board[row+1][col-1]
+                c = self.board[row+2][col-2]
+                if a and a == b == c:
+                    return a
+                
         return None
 
     def is_board_full(self):
         return all(cell != '' for row in self.board for cell in row)
+    
+    def reset_pass(self):
+        return self.reset
 
     def reset_game(self):
         self.board = [['' for _ in range(COLS)] for _ in range(ROWS)]
+        self.prev_board = [['' for _ in range(COLS)] for _ in range(ROWS)]
+        self.reset = 1
         for row in range(ROWS):
             for col in range(COLS):
                 self.buttons[row][col].setText('')
@@ -237,6 +366,8 @@ class TicTacToeGame(QWidget):
         print("Game reset")
         self.timer.stop()
         self.reset_game()
+        self.robot.zero()
+        # self.robot.grip()
         # if hasattr(self.detector,"reset"):
         #     print("Restarting the camera")
         #     self.detector.reset()
