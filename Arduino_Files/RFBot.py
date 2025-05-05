@@ -49,13 +49,15 @@ class RFBot:
         # print(self.arduino.read_data_byte())
         return self.arduino.read_data_byte()
     
-    def robot_state():
+    def robot_state(self):
         
         if  len(get_state) != 0:
             return True
         
         return False
 
+    def clear_buffer(self):
+        self.arduino.ser.reset_serial_buffer()
 
 # from communication import Serial_Device
 # import IK
